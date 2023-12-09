@@ -4,6 +4,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const port = process.env.PORT || 5000;
 
 app.use(cors());
@@ -28,6 +29,7 @@ async function run() {
     const menuCollection = client.db('bistro-boss').collection('menu');
     const reviewCollection = client.db('bistro-boss').collection('reviews');
     const cartCollection = client.db('bistro-boss').collection('cart');
+    const paymentCollection = client.db('bistro-boss').collection('payments');
     // middlewares
     const verifyToken = (req, res, next) => {
       if (!req.headers.authorization) {
@@ -163,6 +165,66 @@ async function run() {
       const query = { _id: new ObjectId(id) }
       const result = await cartCollection.deleteOne(query);
       res.send(result);
+    });
+    // Send a post request for payment intent
+    app.post('/create-payment-intent', async(req, res) => {
+      const {price} = req.body;
+      const amount = parseInt(price * 100);
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      });
+    });
+
+    // Payment related APIs
+    app.post('/payments', async(req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+      const query = {
+        _id: {
+          $in: payment.cartIDs.map(id => new ObjectId(id))
+        }
+      }
+      const deleteResult = await cartCollection.deleteMany(query);
+      res.send({paymentResult, deleteResult});
+    });
+    app.get('/payments', verifyToken, async(req, res) => {
+      const email = req.query.email;
+      if(req.query.email !== req.decoded.email) {
+        return res.status(403).send({message: "Forbidden Access"});
+      }
+      const query = {email: email}
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    });
+    // Stats related APIs
+    app.get('/admin-stats', verifyToken, verifyAdmin, async(req, res) => {
+      const users = await usersCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+      const result = await paymentCollection.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: {
+              $sum: '$price'
+            }
+          }
+        }
+      ]).toArray();
+      const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+      res.send({
+        users,
+        menuItems,
+        orders,
+        revenue
+      });
     })
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
